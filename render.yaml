@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: telegram-voice-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      BOT_TOKEN: 
+        value: 8262116870:AAHml_AG8h7ehmS8zFeWfYjt3WDvEa1IXWw
+      CEREBRAS_KEY: 
+        value: csk-vx2xvc6cmv9th995m9xmh5edm9ynj8xvxpkjt9656y8942jc
+      ELEVENLABS_KEY: 
+        value: 0119f8a151a7bf2bebaf23ab0961b27c588d76c66cd28834bf745bb0cf964f03
