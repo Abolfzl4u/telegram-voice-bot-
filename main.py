@@ -5,13 +5,13 @@ import requests
 import asyncio
 import logging
 import io
-import os
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = os.getenv("8262116870:AAGF96WX_mn7Zl4N8eqmaZcHYHaWjdCKmng")
-CEREBRAS_API_KEY = os.getenv("CEREBRAS_KEY")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_KEY")
+# توکن و کلیدها مستقیماً داخل کد
+TOKEN = "8379881886:AAFu_3B6WOSrvMSnnptb3PrPV3I691KRMzo"
+CEREBRAS_API_KEY = "csk-vx2xvc6cmv9th995m9xmh5edm9ynj8xvxpkjt9656y8942jc"
+ELEVENLABS_API_KEY = "0119f8a151a7bf2bebaf23ab0961b27c588d76c66cd28834bf745bb0cf964f03"
 
 CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL"
