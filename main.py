@@ -9,7 +9,7 @@ import os
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("8262116870:AAGF96WX_mn7Zl4N8eqmaZcHYHaWjdCKmng")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_KEY")
 
