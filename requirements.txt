@@ -1,2 +1,9 @@
-python-telegram-bot==22.0
-requests
+python-telegram-bot==20.7
+telethon==1.36.0
+pytz==2024.2
+jdatetime==5.0.0
+hijridate
+flask==3.0.3
+requests==2.32.3
+aiohttp==3.9.0
+deep-translator==1.11.4
