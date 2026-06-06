@@ -23,6 +23,35 @@ from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.functions.updates import GetStateRequest
 from telethon.tl.types import ReactionEmoji
 
+
+#========== تنظیمات وب سرور برای Render (پورت 10000) ==========
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return jsonify({
+        "status": "running",
+        "bot": "Gap_5_bot",
+        "version": "4.5.0"
+    })
+
+@flask_app.route('/health')
+def health():
+    return jsonify({"status": "healthy"}), 200
+
+@flask_app.route('/ping')
+def ping():
+    """مسیر مخصوص جلوگیری از خواب ربات"""
+    return jsonify({"status": "alive", "message": "Bot is awake"}), 200
+
+def run_web_server():
+    """اجرای سرور وب برای Render روی پورت 10000"""
+    port = int(os.environ.get("PORT", 10000))
+    logger.info(f"🚀 وب سرور روی پورت {port} در حال اجراست")
+    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+
+
 # ================== تنظیمات ==================
 API_ID = 35554639
 API_HASH = "62352ae66f641e72458bb996ee6505fd"
