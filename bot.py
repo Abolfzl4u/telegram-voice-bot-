@@ -16,43 +16,12 @@ from typing import Dict, Optional, Tuple
 from urllib import request as urllib_request
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-# ایمپورت‌های Flask
-from flask import Flask, jsonify
-
 from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.functions.updates import GetStateRequest
 from telethon.tl.types import ReactionEmoji
-
-
-#========== تنظیمات وب سرور برای Render (پورت 10000) ==========
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def home():
-    return jsonify({
-        "status": "running",
-        "bot": "Gap_5_bot",
-        "version": "4.5.0"
-    })
-
-@flask_app.route('/health')
-def health():
-    return jsonify({"status": "healthy"}), 200
-
-@flask_app.route('/ping')
-def ping():
-    """مسیر مخصوص جلوگیری از خواب ربات"""
-    return jsonify({"status": "alive", "message": "Bot is awake"}), 200
-
-def run_web_server():
-    """اجرای سرور وب برای Render روی پورت 10000"""
-    port = int(os.environ.get("PORT", 10000))
-    logger.info(f"🚀 وب سرور روی پورت {port} در حال اجراست")
-    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
 
 # ================== تنظیمات ==================
 API_ID = 35554639
@@ -63,7 +32,9 @@ OWNER_ID = 8158432118
 TARGET_BOT = os.getenv("TARGET_BOT", "zswaifu_cheat_bot")
 LICENSE_FILE = "license_data.json"
 
-# هر سلف یک فایل دیتا و یک پوشه مدیای جدا دارد
+# منطقه زمانی ایران (UTC+3:30)
+TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+
 USER_DATA_DIR = Path("auto_catch_user_data")
 USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 MEDIA_ROOT_DIR = Path("auto_catch_media")
@@ -231,7 +202,7 @@ class AutoCatchBot:
         self.processed_messages: Dict[Tuple[str, int], datetime] = {}
         self.reacted_messages: Dict[Tuple[str, int], datetime] = {}
         self.state_lock = asyncio.Lock()
-        self._last_state_cleanup = datetime.now(timezone.utc)
+        self._last_state_cleanup = datetime.now(TEHRAN_TZ)        # تغییر به وقت تهران
         self._save_task: Optional[asyncio.Task] = None
         self._save_dirty = False
         self._save_lock = asyncio.Lock()
@@ -348,7 +319,7 @@ class AutoCatchBot:
 
             self.data = loaded
             self._rebuild_bot_indexes()
-            self._last_state_cleanup = datetime.now(timezone.utc)
+            self._last_state_cleanup = datetime.now(TEHRAN_TZ)         # تغییر
             self.media_dir.mkdir(parents=True, exist_ok=True)
             log.info("داده‌ها بارگذاری شد | uid=%s file=%s", self.user_id, self.data_file)
         except Exception:
@@ -368,7 +339,7 @@ class AutoCatchBot:
                 "bots": {},
             }
             self._rebuild_bot_indexes()
-            self._last_state_cleanup = datetime.now(timezone.utc)
+            self._last_state_cleanup = datetime.now(TEHRAN_TZ)        # تغییر
 
     def _write_data_sync(self):
         self.media_dir.mkdir(parents=True, exist_ok=True)
@@ -498,16 +469,17 @@ class AutoCatchBot:
         return None
 
     @staticmethod
-    def _as_utc(dt):
+    def _as_tehran(dt):
+        """تبدیل به زمان‌دار با منطقه تهران"""
         if dt is None:
             return None
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+            return dt.replace(tzinfo=TEHRAN_TZ)
+        return dt.astimezone(TEHRAN_TZ)
 
     async def _mark_reacted(self, msg_key):
         async with self.state_lock:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(TEHRAN_TZ)          # تغییر
             self._maybe_cleanup_state_locked(now)
             if msg_key in self.reacted_messages:
                 return False
@@ -551,7 +523,7 @@ class AutoCatchBot:
 
     async def _mark_processed(self, msg_key):
         async with self.state_lock:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(TEHRAN_TZ)         # تغییر
             self._maybe_cleanup_state_locked(now)
             if msg_key in self.processed_messages:
                 return False
@@ -1633,7 +1605,7 @@ class AutoCatchBot:
                 return
             if not self._contains_reaction_keyword(text):
                 return
-            age = (datetime.now(timezone.utc) - self.last_catch_time).total_seconds()
+            age = (datetime.now(TEHRAN_TZ) - self.last_catch_time).total_seconds()  # تغییر
             is_reply_to_me = getattr(event.message, "reply_to_msg_id", None) == self.last_catch_message_id
             should_react = False
             if is_reply_to_me and age <= REACTION_REPLY_WINDOW:
@@ -1701,7 +1673,7 @@ class AutoCatchBot:
             try:
                 print("📨 ارسال پیام به ربات کچ به صورت فوروارد واقعی...")
 
-                start_time = datetime.now(timezone.utc)
+                start_time = datetime.now(TEHRAN_TZ)   # تغییر
 
                 try:
                     forwarded = await self.client.forward_messages(TARGET_BOT, event.message)
@@ -1732,7 +1704,7 @@ class AutoCatchBot:
                 total_timeout = float(self.data.get("timeout", DEFAULT_TIMEOUT))
 
                 while True:
-                    elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+                    elapsed = (datetime.now(TEHRAN_TZ) - start_time).total_seconds()   # تغییر
                     if elapsed >= total_timeout:
                         print("⏰ تایم‌اوت تمام شد")
                         return
@@ -1748,14 +1720,12 @@ class AutoCatchBot:
                         print("⏭ پیام خودمان نادیده گرفته شد")
                         continue
 
-                    reply_dt = self._as_utc(getattr(reply_event.message, "date", None))
+                    reply_dt = self._as_tehran(getattr(reply_event.message, "date", None))  # استفاده از تابع تبدیل به تهران
                     if reply_dt and reply_dt <= start_time:
                         print("⏭ پیام قدیمی نادیده گرفته شد")
                         continue
 
                     if forwarded_msg_id and getattr(reply_event.message, "reply_to_msg_id", None) not in (None, forwarded_msg_id):
-                        # اگر بات به پیام فورواردشده جواب مستقیم داده باشد، باید اولویت داشته باشد.
-                        # در غیر این صورت فقط بر اساس زمان و محتوای معتبر ادامه می‌دهیم.
                         print("ℹ️ پیام دریافتی ریپلای مستقیم نیست، ولی برای بررسی نگه داشته شد")
 
                     reply_text = (
@@ -1786,7 +1756,7 @@ class AutoCatchBot:
                             except Exception as del_err:
                                 log.warning("خطا در حذف پیام | %s", del_err)
 
-                        self.last_catch_time = datetime.now(timezone.utc)
+                        self.last_catch_time = datetime.now(TEHRAN_TZ)  # تغییر
                         self.last_catch_chat_id = str(event.chat_id)
                         self.last_catch_message_id = sent.id
 
@@ -1852,7 +1822,7 @@ class AutoCatchBot:
             try:
                 await asyncio.sleep(60)
                 async with self.state_lock:
-                    self._maybe_cleanup_state_locked(datetime.now(timezone.utc))
+                    self._maybe_cleanup_state_locked(datetime.now(TEHRAN_TZ))  # تغییر
             except Exception:
                 log.exception("queue_worker error | uid=%s", self.user_id)
 
@@ -1956,6 +1926,7 @@ def _is_private_text(event) -> bool:
 
 def _days_left(expire_ts: float) -> int:
     try:
+        # بر اساس مبدا epoch محاسبه می‌شود؛ منطقه زمانی تأثیری ندارد.
         remaining = max(0, float(expire_ts) - datetime.now().timestamp())
         return int(remaining // 86400)
     except Exception:
@@ -2095,10 +2066,10 @@ async def _apply_downtime_to_licenses():
     except Exception:
         last_heartbeat = None
     if not last_heartbeat:
-        _runtime_state_save({'last_heartbeat': datetime.now(timezone.utc).timestamp()})
+        _runtime_state_save({'last_heartbeat': datetime.now(TEHRAN_TZ).timestamp()})   # تغییر
         return
 
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(TEHRAN_TZ).timestamp()    # تغییر
     downtime = max(0.0, now_ts - last_heartbeat)
     if downtime < 1:
         _runtime_state_save({'last_heartbeat': now_ts})
@@ -2514,7 +2485,7 @@ async def private_text_router(event):
 
     if code in license_db['licenses'] and not license_db['licenses'][code].get('used'):
         days = int(license_db['licenses'][code].get('days', 0))
-        expire = datetime.now() + timedelta(days=days)
+        expire = datetime.now(TEHRAN_TZ) + timedelta(days=days)   # تغییر
         try:
             me = await bot.get_me()
             name = getattr(me, 'first_name', None) or '-'
@@ -2968,7 +2939,7 @@ async def _shutdown_all_sessions():
 async def maintenance_loop():
     while True:
         try:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(TEHRAN_TZ)   # تغییر
             # Clean stale pending flows
             stale_uids = []
             for uid, session in list(active_sessions.items()):
@@ -2995,6 +2966,22 @@ async def maintenance_loop():
             log.exception('maintenance loop error')
         await asyncio.sleep(60)
 
+# ================== HTTP سرور برای health-check ==================
+async def handle_health_check(reader, writer):
+    try:
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+        await writer.drain()
+    except Exception:
+        pass
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+async def run_health_server(port: int):
+    server = await asyncio.start_server(handle_health_check, host="0.0.0.0", port=port)
+    log.info(f"Health server running on port {port}")
+    return server
+
 # ================== MAIN ==================
 async def main():
     await bot.start(bot_token=BOT_TOKEN)
@@ -3002,6 +2989,10 @@ async def main():
     await _restore_active_sessions_from_storage()
     maintenance_task = asyncio.create_task(maintenance_loop())
     bot_keepalive_task = _start_bot_keepalive_task()
+
+    port = int(os.getenv("PORT", "10000"))
+    health_server = await run_health_server(port)
+
     print('🚀 ربات فروش + اتو کالکتور راه‌اندازی شد (Telethon)')
     try:
         await bot.run_until_disconnected()
@@ -3012,6 +3003,8 @@ async def main():
             except Exception:
                 pass
         await asyncio.gather(maintenance_task, bot_keepalive_task, return_exceptions=True)
+        health_server.close()
+        await health_server.wait_closed()
         await _shutdown_all_sessions()
         await _stop_bot_keepalive_task()
         try:
