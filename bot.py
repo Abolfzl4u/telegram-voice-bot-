@@ -16,6 +16,9 @@ from typing import Dict, Optional, Tuple
 from urllib import request as urllib_request
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+# ایمپورت‌های Flask
+from flask import Flask, jsonify
+
 from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
@@ -49,7 +52,6 @@ def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     logger.info(f"🚀 وب سرور روی پورت {port} در حال اجراست")
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
 
 
 # ================== تنظیمات ==================
