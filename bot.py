@@ -1,4 +1,14 @@
 import asyncio
+import nest_asyncio
+
+# رفع مشکل Event Loop در Render
+try:
+    nest_asyncio.apply()
+except Exception:
+    pass
+
+asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+
 import html
 import json
 import logging
@@ -16,7 +26,6 @@ from typing import Dict, Optional, Tuple
 from urllib import request as urllib_request
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from flask import Flask, jsonify
 from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
@@ -24,7 +33,15 @@ from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.functions.updates import GetStateRequest
 from telethon.tl.types import ReactionEmoji
 
+# Keep runtime timestamps aligned with Tehran time
+os.environ.setdefault('TZ', 'Asia/Tehran')
+try:
+    time.tzset()
+except AttributeError:
+    pass
+
 # ================== تنظیمات ==================
+
 API_ID = 35554639
 API_HASH = "62352ae66f641e72458bb996ee6505fd"
 BOT_TOKEN = "8623745409:AAFXF92z-bP0DYHRF0PoHmvG9_y9IUZC_5o"
@@ -33,9 +50,7 @@ OWNER_ID = 8158432118
 TARGET_BOT = os.getenv("TARGET_BOT", "zswaifu_cheat_bot")
 LICENSE_FILE = "license_data.json"
 
-# منطقه زمانی ایران (UTC+3:30)
-TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
-
+# هر سلف یک فایل دیتا و یک پوشه مدیای جدا دارد
 USER_DATA_DIR = Path("auto_catch_user_data")
 USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 MEDIA_ROOT_DIR = Path("auto_catch_media")
@@ -58,6 +73,8 @@ MAX_GIF_DELAY = 30.0
 KEEPALIVE_INTERVAL_SECONDS = max(60.0, float(os.getenv("KEEPALIVE_INTERVAL_SECONDS", "300")))
 KEEPALIVE_TIMEOUT_SECONDS = max(2.0, float(os.getenv("KEEPALIVE_TIMEOUT_SECONDS", "10")))
 KEEPALIVE_URL = (os.getenv("KEEPALIVE_URL") or os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_URL") or "").strip()
+PORT = int(os.getenv("PORT", "10000"))
+HTTP_HOST = os.getenv("HTTP_HOST", "0.0.0.0")
 
 REACTION_REPLY_WINDOW = 90.0
 REACTION_DIRECT_WINDOW = 5.0
@@ -138,6 +155,37 @@ async def _http_keepalive_once(url: str) -> bool:
     except Exception:
         return False
 
+
+async def _healthcheck_client_handler(reader, writer):
+    try:
+        try:
+            await asyncio.wait_for(reader.read(1024), timeout=2.0)
+        except Exception:
+            pass
+        body = b"OK"
+        headers = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Cache-Control: no-store\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("utf-8")
+        writer.write(headers + body)
+        await writer.drain()
+    except Exception:
+        pass
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
+async def _start_health_server(host: str = HTTP_HOST, port: int = PORT):
+    return await asyncio.start_server(_healthcheck_client_handler, host, port)
+
 # ================== LICENSE DB ==================
 def load_license():
     def _to_int_keyed_dict(raw):
@@ -203,7 +251,7 @@ class AutoCatchBot:
         self.processed_messages: Dict[Tuple[str, int], datetime] = {}
         self.reacted_messages: Dict[Tuple[str, int], datetime] = {}
         self.state_lock = asyncio.Lock()
-        self._last_state_cleanup = datetime.now(TEHRAN_TZ)
+        self._last_state_cleanup = datetime.now(timezone.utc)
         self._save_task: Optional[asyncio.Task] = None
         self._save_dirty = False
         self._save_lock = asyncio.Lock()
@@ -236,6 +284,7 @@ class AutoCatchBot:
     def load_data(self):
         self.media_dir.mkdir(parents=True, exist_ok=True)
         if not self.data_file.exists():
+            # مهاجرت اولیه از فایل قدیمی مشترک؛ بعد از این هر سلف فایل خودش را دارد
             if os.path.exists(AUTO_DATA_FILE):
                 try:
                     with open(AUTO_DATA_FILE, "r", encoding="utf-8") as f:
@@ -299,6 +348,7 @@ class AutoCatchBot:
             loaded["delete_after_send"] = bool(loaded.get("delete_after_send", False))
             loaded["gif_enabled"] = bool(loaded.get("gif_enabled", False))
 
+            # Normalize media items
             media_items = []
             for item in loaded.get("media_items", []):
                 if not isinstance(item, dict):
@@ -318,7 +368,7 @@ class AutoCatchBot:
 
             self.data = loaded
             self._rebuild_bot_indexes()
-            self._last_state_cleanup = datetime.now(TEHRAN_TZ)
+            self._last_state_cleanup = datetime.now(timezone.utc)
             self.media_dir.mkdir(parents=True, exist_ok=True)
             log.info("داده‌ها بارگذاری شد | uid=%s file=%s", self.user_id, self.data_file)
         except Exception:
@@ -338,7 +388,7 @@ class AutoCatchBot:
                 "bots": {},
             }
             self._rebuild_bot_indexes()
-            self._last_state_cleanup = datetime.now(TEHRAN_TZ)
+            self._last_state_cleanup = datetime.now(timezone.utc)
 
     def _write_data_sync(self):
         self.media_dir.mkdir(parents=True, exist_ok=True)
@@ -350,14 +400,15 @@ class AutoCatchBot:
 
     async def _flush_pending_save(self):
         try:
-            await asyncio.sleep(SAVE_DEBOUNCE_SECONDS)
             while True:
-                self._save_dirty = False
+                await asyncio.sleep(SAVE_DEBOUNCE_SECONDS)
                 async with self._save_lock:
-                    await asyncio.to_thread(self._write_data_sync)
+                    if not self._save_dirty:
+                        return
+                    self._save_dirty = False
+                await asyncio.to_thread(self._write_data_sync)
                 if not self._save_dirty:
                     return
-                await asyncio.sleep(SAVE_DEBOUNCE_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -468,16 +519,16 @@ class AutoCatchBot:
         return None
 
     @staticmethod
-    def _as_tehran(dt):
+    def _as_utc(dt):
         if dt is None:
             return None
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=TEHRAN_TZ)
-        return dt.astimezone(TEHRAN_TZ)
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
 
     async def _mark_reacted(self, msg_key):
         async with self.state_lock:
-            now = datetime.now(TEHRAN_TZ)
+            now = datetime.now(timezone.utc)
             self._maybe_cleanup_state_locked(now)
             if msg_key in self.reacted_messages:
                 return False
@@ -503,7 +554,7 @@ class AutoCatchBot:
 
     async def _mark_processed(self, msg_key):
         async with self.state_lock:
-            now = datetime.now(TEHRAN_TZ)
+            now = datetime.now(timezone.utc)
             self._maybe_cleanup_state_locked(now)
             if msg_key in self.processed_messages:
                 return False
@@ -616,6 +667,7 @@ class AutoCatchBot:
             return False
 
     async def _keepalive_tick(self):
+        """ارسال یک درخواست سبک و تلاش برای زنده ماندن سشن."""
         try:
             if self.client:
                 try:
@@ -708,6 +760,7 @@ class AutoCatchBot:
         self.me = await self.client.get_me()
         log.info(f"✅ AutoCollector started on account {self.me.id} (@{self.me.username})")
 
+        # حذف هندلرهای قبلی در صورت وجود
         try:
             self.client.remove_event_handler(self.handle_message)
             self.client.remove_event_handler(self._push_target_event)
@@ -733,6 +786,7 @@ class AutoCatchBot:
 
             stripped_text = text.strip()
 
+            # یک نقطهٔ تنها (یا نقطه + فاصله/خط جدید) نباید به‌عنوان دستور حساب شود.
             if stripped_text == ".":
                 return
 
@@ -742,6 +796,7 @@ class AutoCatchBot:
                 await self.handle_command(event, stripped_text)
                 return
 
+            # Group ID capture
             gid_req = self.data.get("get_group_id")
             if gid_req and isinstance(gid_req, dict) and gid_req.get("waiting"):
                 expires_at = gid_req.get("expires_at")
@@ -754,7 +809,7 @@ class AutoCatchBot:
                     pass
 
             if gid_req and isinstance(gid_req, dict) and gid_req.get("waiting"):
-                if getattr(event, "is_group", False):
+                if getattr(event, "is_group", False) and _is_sticker_message(event.message):
                     await self.send_group_id(event)
                     return
 
@@ -1581,7 +1636,7 @@ class AutoCatchBot:
                 return
             if not self._contains_reaction_keyword(text):
                 return
-            age = (datetime.now(TEHRAN_TZ) - self.last_catch_time).total_seconds()
+            age = (datetime.now(timezone.utc) - self.last_catch_time).total_seconds()
             is_reply_to_me = getattr(event.message, "reply_to_msg_id", None) == self.last_catch_message_id
             should_react = False
             if is_reply_to_me and age <= REACTION_REPLY_WINDOW:
@@ -1649,7 +1704,7 @@ class AutoCatchBot:
             try:
                 print("📨 ارسال پیام به ربات کچ به صورت فوروارد واقعی...")
 
-                start_time = datetime.now(TEHRAN_TZ)
+                start_time = datetime.now(timezone.utc)
 
                 try:
                     forwarded = await self.client.forward_messages(TARGET_BOT, event.message)
@@ -1680,7 +1735,7 @@ class AutoCatchBot:
                 total_timeout = float(self.data.get("timeout", DEFAULT_TIMEOUT))
 
                 while True:
-                    elapsed = (datetime.now(TEHRAN_TZ) - start_time).total_seconds()
+                    elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
                     if elapsed >= total_timeout:
                         print("⏰ تایم‌اوت تمام شد")
                         return
@@ -1696,12 +1751,14 @@ class AutoCatchBot:
                         print("⏭ پیام خودمان نادیده گرفته شد")
                         continue
 
-                    reply_dt = self._as_tehran(getattr(reply_event.message, "date", None))
+                    reply_dt = self._as_utc(getattr(reply_event.message, "date", None))
                     if reply_dt and reply_dt <= start_time:
                         print("⏭ پیام قدیمی نادیده گرفته شد")
                         continue
 
                     if forwarded_msg_id and getattr(reply_event.message, "reply_to_msg_id", None) not in (None, forwarded_msg_id):
+                        # اگر بات به پیام فورواردشده جواب مستقیم داده باشد، باید اولویت داشته باشد.
+                        # در غیر این صورت فقط بر اساس زمان و محتوای معتبر ادامه می‌دهیم.
                         print("ℹ️ پیام دریافتی ریپلای مستقیم نیست، ولی برای بررسی نگه داشته شد")
 
                     reply_text = (
@@ -1732,7 +1789,7 @@ class AutoCatchBot:
                             except Exception as del_err:
                                 log.warning("خطا در حذف پیام | %s", del_err)
 
-                        self.last_catch_time = datetime.now(TEHRAN_TZ)
+                        self.last_catch_time = datetime.now(timezone.utc)
                         self.last_catch_chat_id = str(event.chat_id)
                         self.last_catch_message_id = sent.id
 
@@ -1798,12 +1855,15 @@ class AutoCatchBot:
             try:
                 await asyncio.sleep(60)
                 async with self.state_lock:
-                    self._maybe_cleanup_state_locked(datetime.now(TEHRAN_TZ))
+                    self._maybe_cleanup_state_locked(datetime.now(timezone.utc))
             except Exception:
                 log.exception("queue_worker error | uid=%s", self.user_id)
 
+
+
 # ================== SELLER BOT ==================
-bot = TelegramClient('seller_bot', API_ID, API_HASH)
+# کلاینت بات در main ساخته می‌شود تا با همان event loop اجرا شود.
+bot: Optional[TelegramClient] = None
 
 # ---------- Keyboards ----------
 def _user_home_keyboard():
@@ -1812,11 +1872,13 @@ def _user_home_keyboard():
         [Button.text('انصراف', resize=True)],
     ]
 
+
 def _activation_keyboard():
     return [
         [Button.request_phone('ارسال شماره', resize=True, single_use=True)],
         [Button.text('انصراف', resize=True)],
     ]
+
 
 def _owner_keyboard():
     return [
@@ -1826,17 +1888,21 @@ def _owner_keyboard():
         [Button.text('↩️ انصراف', resize=True)],
     ]
 
+
 def _renew_mode_keyboard():
     return [
         [Button.text('افزایش روز', resize=True), Button.text('کسر روز', resize=True)],
         [Button.text('↩️ انصراف', resize=True)],
     ]
 
+
 def _cancel_inline_keyboard(prefix: str = 'owner_cancel'):
     return [[Button.inline('❌ لغو', prefix.encode())]]
 
+
 def _confirm_inline_keyboard(confirm_data: bytes, cancel_data: bytes = b'owner_cancel'):
     return [[Button.inline('✅ تأیید', confirm_data), Button.inline('❌ لغو', cancel_data)]]
+
 
 def _menu_key(text: str) -> str:
     text = unicodedata.normalize('NFKC', text or '')
@@ -1844,28 +1910,6 @@ def _menu_key(text: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip().casefold()
     return text
 
-def _normalize_phone_for_login(phone_number: str) -> Optional[str]:
-    raw = unicodedata.normalize('NFKC', str(phone_number or '')).strip()
-    if not raw:
-        return None
-
-    if raw.startswith('+'):
-        digits = re.sub(r'\D', '', raw)
-        if 6 <= len(digits) <= 15:
-            return '+' + digits
-        return None
-
-    digits = re.sub(r'\D', '', raw)
-    if not digits:
-        return None
-
-    if raw.startswith('00') and len(digits) > 2:
-        digits = digits[2:]
-
-    if len(digits) < 6 or len(digits) > 15:
-        return None
-
-    return '+' + digits
 
 def _emoji_codepoints(value: str) -> str:
     try:
@@ -1873,11 +1917,13 @@ def _emoji_codepoints(value: str) -> str:
     except Exception:
         return '-'
 
+
 def _is_private_text(event) -> bool:
     try:
         return bool(event.is_private and (event.raw_text is not None or event.message))
     except Exception:
         return False
+
 
 def _days_left(expire_ts: float) -> int:
     try:
@@ -1886,9 +1932,11 @@ def _days_left(expire_ts: float) -> int:
     except Exception:
         return 0
 
+
 def _license_valid(uid: int) -> bool:
     user = license_db['users'].get(uid)
     return bool(user and datetime.now().timestamp() < float(user.get('expire', 0)))
+
 
 def _user_status_lines(uid: int) -> str:
     user = license_db['users'].get(uid, {})
@@ -1960,6 +2008,35 @@ def _clean_license_db_shapes():
     license_db.setdefault("users", {})
     license_db.setdefault("started_users", {})
 
+
+def _is_sticker_message(message) -> bool:
+    try:
+        if getattr(message, 'sticker', None):
+            return True
+
+        media = getattr(message, 'media', None)
+        if not media:
+            return False
+
+        document = getattr(media, 'document', None)
+        if not document:
+            return False
+
+        mime_type = getattr(document, 'mime_type', None) or ''
+        if mime_type in {'image/webp', 'application/x-tgsticker', 'video/webm'}:
+            return True
+
+        attrs = getattr(document, 'attributes', None) or []
+        for attr in attrs:
+            name = attr.__class__.__name__
+            if name in {'DocumentAttributeSticker', 'DocumentAttributeCustomEmoji'}:
+                return True
+
+        return any(token in str(type(media)).lower() for token in ('sticker', 'document'))
+    except Exception:
+        return False
+
+
 def _runtime_state_load() -> dict:
     if not os.path.exists(RUNTIME_STATE_FILE):
         return {}
@@ -1970,6 +2047,7 @@ def _runtime_state_load() -> dict:
     except Exception:
         return {}
 
+
 def _runtime_state_save(data: dict):
     try:
         tmp = RUNTIME_STATE_FILE + '.tmp'
@@ -1979,6 +2057,7 @@ def _runtime_state_save(data: dict):
     except Exception:
         pass
 
+
 async def _apply_downtime_to_licenses():
     state = _runtime_state_load()
     last_heartbeat = state.get('last_heartbeat')
@@ -1987,10 +2066,10 @@ async def _apply_downtime_to_licenses():
     except Exception:
         last_heartbeat = None
     if not last_heartbeat:
-        _runtime_state_save({'last_heartbeat': datetime.now(TEHRAN_TZ).timestamp()})
+        _runtime_state_save({'last_heartbeat': datetime.now(timezone.utc).timestamp()})
         return
 
-    now_ts = datetime.now(TEHRAN_TZ).timestamp()
+    now_ts = datetime.now(timezone.utc).timestamp()
     downtime = max(0.0, now_ts - last_heartbeat)
     if downtime < 1:
         _runtime_state_save({'last_heartbeat': now_ts})
@@ -2014,6 +2093,7 @@ async def _apply_downtime_to_licenses():
         save_license(license_db)
     _runtime_state_save({'last_heartbeat': now_ts})
 
+
 async def _restore_active_sessions_from_storage():
     restored = 0
     for uid, user in list(license_db.get('users', {}).items()):
@@ -2035,7 +2115,7 @@ async def _restore_active_sessions_from_storage():
                 await client.disconnect()
                 continue
 
-            collector = AutoCatchBot(uid_int)
+            collector = AutoCatchBot(uid)
             await collector.start_collector(client)
             me = await client.get_me()
             active_sessions[uid_int] = {
@@ -2053,17 +2133,20 @@ async def _restore_active_sessions_from_storage():
     if restored:
         log.info('تعداد سشن‌های بازیابی‌شده: %s', restored)
 
+
 async def _send_home(event, text: str):
     await event.reply(text, buttons=_user_home_keyboard(), parse_mode='html')
+
 
 async def _send_activation_prompt(event):
     await event.reply(
         '🚀 <b>اتصال به اکانت تلگرام</b>\n\n'
         'برای ادامه فقط از دکمه <b>ارسال شماره</b> استفاده کن.\n'
-        'هر شماره‌ای از هر کشور پذیرفته می‌شود، ولی باید حتماً با دکمه ارسال شود تا به‌صورت ریپلای ثبت گردد.',
+        'شماره فقط از طریق خود تلگرام و با تأیید کاربر پذیرفته می‌شود.',
         buttons=_activation_keyboard(),
         parse_mode='html',
     )
+
 
 async def _finish_login(uid: int, session: dict, event):
     client = session['client']
@@ -2101,11 +2184,12 @@ async def _finish_login(uid: int, session: dict, event):
         parse_mode='html',
     )
 
+
 async def _cancel_active_flow(uid: int, event, msg: str = '✅ عملیات لغو شد.'):
     _cancel_session(uid)
     await event.reply(msg, buttons=_user_home_keyboard(), parse_mode='html')
 
-@bot.on(events.NewMessage(pattern=r'^/start$'))
+
 async def start_handler(event):
     uid = event.sender_id
     if uid == OWNER_ID:
@@ -2135,7 +2219,7 @@ async def start_handler(event):
         'برای فعال‌سازی، اول کد لایسنس را بفرست یا از دکمه‌های پایین استفاده کن.',
     )
 
-@bot.on(events.NewMessage(pattern=r'^/owner$'))
+
 async def owner_panel(event):
     if event.sender_id != OWNER_ID:
         return
@@ -2149,7 +2233,7 @@ async def owner_panel(event):
         parse_mode='html'
     )
 
-@bot.on(events.CallbackQuery(data=b'activate_self'))
+
 async def activate_self_callback(event):
     uid = event.sender_id
     if not _license_valid(uid):
@@ -2170,7 +2254,7 @@ async def activate_self_callback(event):
     await event.answer('برای ادامه شماره را با دکمه ارسال کن')
     await _send_activation_prompt(event)
 
-@bot.on(events.CallbackQuery(data=b'status'))
+
 async def status_callback(event):
     uid = event.sender_id
     if uid not in license_db['users']:
@@ -2186,7 +2270,7 @@ async def status_callback(event):
     )
     await event.answer('اطلاعات وضعیت ارسال شد', alert=False)
 
-@bot.on(events.CallbackQuery(data=b'owner_cancel'))
+
 async def owner_cancel(event):
     if event.sender_id != OWNER_ID:
         return await event.answer('فقط مالک', alert=True)
@@ -2196,14 +2280,14 @@ async def owner_cancel(event):
     except Exception:
         await event.answer('لغو شد', alert=False)
 
-@bot.on(events.CallbackQuery(data=b'owner_create'))
+
 async def owner_create_start(event):
     if event.sender_id != OWNER_ID:
         return await event.answer('فقط مالک', alert=True)
     active_sessions[OWNER_ID] = {'stage': 'owner_create_days', 'started_at': datetime.now().timestamp()}
     await event.respond('📅 تعداد روزهای اعتبار را بفرستید:', buttons=[[Button.text('↩️ انصراف', resize=True)]], parse_mode='html')
 
-@bot.on(events.CallbackQuery(data=b'owner_renew'))
+
 async def owner_renew_start(event):
     if event.sender_id != OWNER_ID:
         return await event.answer('فقط مالک', alert=True)
@@ -2216,14 +2300,14 @@ async def owner_renew_start(event):
         parse_mode='html'
     )
 
-@bot.on(events.CallbackQuery(data=b'owner_stop'))
+
 async def owner_stop_start(event):
     if event.sender_id != OWNER_ID:
         return await event.answer('فقط مالک', alert=True)
     active_sessions[OWNER_ID] = {'stage': 'owner_stop_uid', 'started_at': datetime.now().timestamp()}
     await event.respond('🆔 آیدی عددی کاربر را بفرستید:', buttons=[[Button.text('↩️ انصراف', resize=True)]], parse_mode='html')
 
-@bot.on(events.CallbackQuery(data=b'owner_list'))
+
 async def owner_list(event):
     if event.sender_id != OWNER_ID:
         return await event.answer('فقط مالک', alert=True)
@@ -2241,7 +2325,7 @@ async def owner_list(event):
     await event.reply('\n'.join(lines), parse_mode='html')
     await event.answer('لیست کاربران ارسال شد', alert=False)
 
-@bot.on(events.NewMessage(func=_is_private_text))
+
 async def private_text_router(event):
     uid = event.sender_id
     if uid == OWNER_ID:
@@ -2249,6 +2333,7 @@ async def private_text_router(event):
     text = (event.raw_text or '').strip()
     key = _menu_key(text)
 
+    # Stage-based handling first
     if uid in active_sessions and active_sessions[uid].get('stage') in {'waiting_phone', 'waiting_code', 'waiting_password'}:
         session = active_sessions[uid]
 
@@ -2270,13 +2355,34 @@ async def private_text_router(event):
                 )
 
             phone_number = str(getattr(contact, 'phone_number', '') or '').strip()
-            phone_for_login = _normalize_phone_for_login(phone_number)
-            if not phone_for_login:
+            contact_user_id = getattr(contact, 'user_id', None)
+            if contact_user_id not in (None, 0, uid):
                 return await event.reply(
-                    '❌ شماره معتبر نیست.\nشماره باید با دکمه ارسال شود و در قالب بین‌المللی قابل تشخیص باشد.',
+                    '❌ این شماره به خودت تعلق ندارد.\n'
+                    'لطفاً فقط شماره خودت را با دکمه بفرست.',
                     buttons=_activation_keyboard(),
                     parse_mode='html',
                 )
+
+            canonical_digits = re.sub(r'\D', '', phone_number)
+            if canonical_digits.startswith('00'):
+                canonical_digits = canonical_digits[2:]
+            if canonical_digits.startswith('0') and len(canonical_digits) == 11:
+                canonical_digits = '98' + canonical_digits[1:]
+            if canonical_digits.startswith('98') and len(canonical_digits) >= 12:
+                pass
+            elif len(canonical_digits) == 10 and canonical_digits.startswith('9'):
+                canonical_digits = '98' + canonical_digits
+            elif len(canonical_digits) == 11 and canonical_digits.startswith('9'):
+                canonical_digits = '98' + canonical_digits
+            else:
+                return await event.reply(
+                    '❌ شماره معتبر نیست.\nنمونه درست: 98912xxxxxxx یا +98912xxxxxxx',
+                    buttons=_activation_keyboard(),
+                    parse_mode='html',
+                )
+
+            phone_for_login = '+' + canonical_digits if not canonical_digits.startswith('+') else canonical_digits
 
             try:
                 client = TelegramClient(StringSession(), API_ID, API_HASH)
@@ -2341,6 +2447,7 @@ async def private_text_router(event):
                     parse_mode='html',
                 )
 
+    # Home menu handling
     if key in {'فعال سازی', 'فعال‌سازی'}:
         if not _license_valid(uid):
             return await event.reply(
@@ -2376,6 +2483,7 @@ async def private_text_router(event):
             return await _cancel_active_flow(uid, event)
         return await event.reply('✅ چیزی برای لغو وجود ندارد.', buttons=_user_home_keyboard(), parse_mode='html')
 
+    # License code input
     if uid in active_sessions and active_sessions[uid].get('stage') == 'active':
         return
     if text.startswith('/'):
@@ -2388,7 +2496,7 @@ async def private_text_router(event):
 
     if code in license_db['licenses'] and not license_db['licenses'][code].get('used'):
         days = int(license_db['licenses'][code].get('days', 0))
-        expire = datetime.now(TEHRAN_TZ) + timedelta(days=days)
+        expire = datetime.now() + timedelta(days=days)
         try:
             me = await bot.get_me()
             name = getattr(me, 'first_name', None) or '-'
@@ -2411,7 +2519,7 @@ async def private_text_router(event):
 
     await event.reply('❌ کد لایسنس نامعتبر یا قبلاً استفاده شده.', buttons=_user_home_keyboard(), parse_mode='html')
 
-@bot.on(events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and _is_private_text(e)))
+
 async def owner_text_router(event):
     key = _menu_key(event.raw_text or '')
     session = active_sessions.get(OWNER_ID, {})
@@ -2454,6 +2562,7 @@ async def owner_text_router(event):
             parse_mode='html',
         )
 
+    # منوی ثابت مالک
     if not stage:
         if key in {'🧾 ساخت لایسنس', 'ساخت لایسنس'}:
             active_sessions[OWNER_ID] = {'stage': 'owner_create_days', 'started_at': datetime.now().timestamp()}
@@ -2611,7 +2720,6 @@ async def owner_text_router(event):
             parse_mode='html',
         )
 
-@bot.on(events.CallbackQuery(data=b'owner_stop_confirm'))
 async def owner_stop_confirm(event):
     if event.sender_id != OWNER_ID:
         return await event.answer('فقط مالک', alert=True)
@@ -2638,7 +2746,7 @@ async def owner_stop_confirm(event):
         parse_mode='html',
     )
 
-@bot.on(events.CallbackQuery(data=b'owner_broadcast_send'))
+
 async def owner_broadcast_send(event):
     if event.sender_id != OWNER_ID:
         return await event.answer('فقط مالک', alert=True)
@@ -2650,6 +2758,7 @@ async def owner_broadcast_send(event):
     recipients = []
     seen = set()
 
+    # همه کاربران ثبت‌شده + استارت‌زده + خود مالک
     source_ids = set([OWNER_ID])
     source_ids.update(license_db.get('users', {}).keys())
     source_ids.update(license_db.get('started_users', {}).keys())
@@ -2703,6 +2812,7 @@ async def owner_broadcast_send(event):
                 pass
         _cancel_session(OWNER_ID)
 
+
 async def _send_active_sessions_file(event):
     active = []
     for uid, session in active_sessions.items():
@@ -2755,33 +2865,49 @@ async def _delete_file_later(path: Path, delay: int = 60):
     except Exception:
         pass
 
-@bot.on(events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and e.is_private and e.text and e.text.startswith('/')))
 async def owner_command_router(event):
+    # نگه‌داری سازگاری با پیام‌های فرمانی، اگر لازم شد.
     if event.raw_text.strip() == '/owner':
         await event.reply('🛠 <b>پنل مالک</b>', buttons=_owner_keyboard(), parse_mode='html')
+
+
+
+def register_bot_handlers(client: TelegramClient):
+    client.add_event_handler(start_handler, events.NewMessage(pattern=r'^/start$'))
+    client.add_event_handler(owner_panel, events.NewMessage(pattern=r'^/owner$'))
+    client.add_event_handler(activate_self_callback, events.CallbackQuery(data=b'activate_self'))
+    client.add_event_handler(status_callback, events.CallbackQuery(data=b'status'))
+    client.add_event_handler(owner_cancel, events.CallbackQuery(data=b'owner_cancel'))
+    client.add_event_handler(owner_create_start, events.CallbackQuery(data=b'owner_create'))
+    client.add_event_handler(owner_renew_start, events.CallbackQuery(data=b'owner_renew'))
+    client.add_event_handler(owner_stop_start, events.CallbackQuery(data=b'owner_stop'))
+    client.add_event_handler(owner_list, events.CallbackQuery(data=b'owner_list'))
+    client.add_event_handler(private_text_router, events.NewMessage(func=_is_private_text))
+    client.add_event_handler(owner_text_router, events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and _is_private_text(e)))
+    client.add_event_handler(owner_stop_confirm, events.CallbackQuery(data=b'owner_stop_confirm'))
+    client.add_event_handler(owner_broadcast_send, events.CallbackQuery(data=b'owner_broadcast_send'))
+    client.add_event_handler(owner_command_router, events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and e.is_private and e.text and e.text.startswith('/')))
 
 async def _bot_keepalive_loop():
     try:
         await asyncio.sleep(random.uniform(5, 20))
         while True:
             try:
+                if not bot.is_connected():
+                    try:
+                        await bot.connect()
+                    except Exception:
+                        pass
                 if bot.is_connected():
                     try:
                         await bot(GetStateRequest())
                     except Exception:
                         pass
-                else:
-                    try:
-                        await bot.connect()
-                    except Exception:
-                        pass
-                    try:
-                        if bot.is_connected():
-                            await bot(GetStateRequest())
-                    except Exception:
-                        pass
                 if KEEPALIVE_URL:
-                    await _http_keepalive_once(KEEPALIVE_URL)
+                    try:
+                        await _http_keepalive_once(KEEPALIVE_URL)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             await asyncio.sleep(KEEPALIVE_INTERVAL_SECONDS)
@@ -2790,12 +2916,14 @@ async def _bot_keepalive_loop():
     except Exception:
         log.exception('bot keepalive loop error')
 
+
 def _start_bot_keepalive_task():
     global BOT_KEEPALIVE_TASK
     if BOT_KEEPALIVE_TASK and not BOT_KEEPALIVE_TASK.done():
         return BOT_KEEPALIVE_TASK
     BOT_KEEPALIVE_TASK = asyncio.create_task(_bot_keepalive_loop())
     return BOT_KEEPALIVE_TASK
+
 
 async def _stop_bot_keepalive_task():
     global BOT_KEEPALIVE_TASK
@@ -2811,6 +2939,7 @@ async def _stop_bot_keepalive_task():
             pass
         except Exception:
             pass
+
 
 async def _shutdown_all_sessions():
     for uid, session in list(active_sessions.items()):
@@ -2828,10 +2957,12 @@ async def _shutdown_all_sessions():
             pass
         active_sessions.pop(uid, None)
 
+
 async def maintenance_loop():
     while True:
         try:
-            now = datetime.now(TEHRAN_TZ)
+            now = datetime.now(timezone.utc)
+            # Clean stale pending flows
             stale_uids = []
             for uid, session in list(active_sessions.items()):
                 if session.get('stage') != 'active':
@@ -2857,70 +2988,66 @@ async def maintenance_loop():
             log.exception('maintenance loop error')
         await asyncio.sleep(60)
 
-# ================== FLASK WEB SERVER برای RENDER ==================
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def home():
-    return jsonify({
-        "status": "running",
-        "bot": "AutoCollectorBot",
-        "version": "5.0.0",
-        "time": datetime.now(TEHRAN_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    })
-
-@flask_app.route('/health')
-def health():
-    return jsonify({"status": "healthy", "time": datetime.now(TEHRAN_TZ).strftime("%Y-%m-%d %H:%M:%S")}), 200
-
-@flask_app.route('/ping')
-def ping():
-    return jsonify({"status": "alive", "message": "Bot is awake", "time": datetime.now(TEHRAN_TZ).strftime("%Y-%m-%d %H:%M:%S")}), 200
-
-def run_flask():
-    """اجرای سرور Flask در یک ترد جداگانه"""
-    port = int(os.environ.get("PORT", 10000))
-    log.info(f"🌐 Flask web server starting on port {port}")
-    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
 # ================== MAIN ==================
 async def main():
-    # راه‌اندازی Flask در ترد جداگانه (برای Render)
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    log.info("✅ Flask web server started in background thread")
-    
-    await bot.start(bot_token=BOT_TOKEN)
-    await _apply_downtime_to_licenses()
-    await _restore_active_sessions_from_storage()
-    maintenance_task = asyncio.create_task(maintenance_loop())
-    bot_keepalive_task = _start_bot_keepalive_task()
+    global bot
+    health_server = None
+    maintenance_task = None
+    bot_keepalive_task = None
 
-    log.info('🚀 ربات فروش + اتو کالکتور راه‌اندازی شد')
-    
     try:
+        bot = TelegramClient('seller_bot', API_ID, API_HASH)
+        register_bot_handlers(bot)
+
+        # Health Server
+        health_server = await _start_health_server(HTTP_HOST, PORT)
+        sockets = health_server.sockets or []
+        if sockets:
+            sock_info = ", ".join(f"{sock.getsockname()[0]}:{sock.getsockname()[1]}" for sock in sockets)
+        else:
+            sock_info = f"{HTTP_HOST}:{PORT}"
+        log.info(f"✅ Healthcheck server started on {sock_info}")
+
+        await asyncio.sleep(0.8)   # تثبیت لوپ
+
+        await bot.start(bot_token=BOT_TOKEN)
+        log.info("✅ Seller Bot started successfully")
+
+        await _apply_downtime_to_licenses()
+        await _restore_active_sessions_from_storage()
+
+        maintenance_task = asyncio.create_task(maintenance_loop())
+        bot_keepalive_task = _start_bot_keepalive_task()
+
+        print('🚀 ربات فروش + اتو کالکتور راه‌اندازی شد')
         await bot.run_until_disconnected()
+
     finally:
         for task in (maintenance_task, bot_keepalive_task):
-            try:
+            if task and not task.done():
                 task.cancel()
-            except Exception:
-                pass
-        await asyncio.gather(maintenance_task, bot_keepalive_task, return_exceptions=True)
+
+        await asyncio.gather(
+            *(t for t in (maintenance_task, bot_keepalive_task) if t is not None),
+            return_exceptions=True,
+        )
+
         await _shutdown_all_sessions()
         await _stop_bot_keepalive_task()
-        try:
-            await bot.disconnect()
-        except Exception:
-            pass
+
+        if health_server:
+            try:
+                health_server.close()
+                await health_server.wait_closed()
+            except Exception:
+                pass
+
+        if bot:
+            try:
+                await bot.disconnect()
+            except Exception:
+                pass
+
 
 if __name__ == '__main__':
-    import threading
-    try:
-        asyncio.run(main())
-    except RuntimeError as e:
-        if 'event loop is closed' in str(e).lower():
-            print('برطرف کردن خطای event loop...')
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(main())
+    asyncio.run(main())
